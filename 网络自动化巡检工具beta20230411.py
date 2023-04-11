@@ -22,6 +22,7 @@ import sys
 import re
 import threading
 import platform
+import re
 
 from datetime import datetime
 from openpyxl.reader.excel import load_workbook
@@ -31,6 +32,17 @@ from netmiko import ConnectHandler
 from netmiko.ssh_exception import (NetMikoTimeoutException, AuthenticationException, SSHException)
 from netmiko.fortinet import FortinetSSH
 from netmiko.juniper import JuniperSSH
+
+RE_HOSTNAME = {
+    'huawei': re.compile(r"(?<=(\<|\[)).*?(?=(\>|\]))", re.IGNORECASE),  # <hostname> or [hostname]
+    'hp_comware': re.compile(r"(?<=(\<|\[)).*(?=(\>|\]))", re.IGNORECASE),  # <hostname> or [hostname]
+    'cisco': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname> or hostname#
+    'aruba': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname#
+    'fortinet': re.compile(r".*?(?=#)", re.IGNORECASE),  # hostname#
+    'a10': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname-Active> or hostname-Active#
+    'paloalto': re.compile(r"(?<=(@)).*?(?=(\(|\>))", re.IGNORECASE),  # admin@hostname(active)>,
+    'juniper': re.compile(r".*?(?=(\-\>))", re.IGNORECASE),  # hostname->
+}
 
 
 class MyFortinetSSH(FortinetSSH):
@@ -192,12 +204,13 @@ class BackupConfig(object):
     def format_hostname(self, hostname, device_type):
         """格式化主机名称"""
         try:
-            if "paloalto" in device_type:  # admin@PA_01(active)
-                new_hostname = hostname.split('@')[-1].split('(')[0]
-            elif "a10" in device_type:  # A10-Active#
-                new_hostname = hostname.rsplit('-', maxsplit=1)[0]
-            else:
-                new_hostname = hostname.split()[0].strip("<>#$() ")
+            for vendor, regex in RE_HOSTNAME.items():
+                if vendor in device_type:
+                    match = re.search(regex, hostname)
+                    if match:
+                        new_hostname = match.group(0)
+                    else:
+                        new_hostname = hostname.split()[0].strip("<>#$()[] ")
 
         except Exception as e:
             self.printPretty(e)
@@ -284,10 +297,10 @@ class BackupConfig(object):
             # 获取设备名称并格式化
             hostname = self.format_hostname(conn.find_prompt(), host['device_type'])
             dirname = host['ip'] + '_' + hostname  # 192.168.1.1_Router-01
-            dirpath = os.path.join(self.log, self.logtime, dirname)  # LOG/2022-01-01_00:00:01/192.168.1.1_Router01
 
             # 这里要注意下windown文件命名不能有特殊符号，否则会创建失败
             try:
+                dirpath = os.path.join(self.log, self.logtime, dirname)  # LOG/2022-01-01_00:00:01/192.168.1.1_Router01
                 # 递归创建目录
                 os.makedirs(dirpath)
             except:
@@ -422,4 +435,3 @@ if __name__ == '__main__':
     else:
         print("没有这个功能!")
         sys.exit(1)
-
