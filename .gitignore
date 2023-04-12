@@ -1,3 +1,4 @@
+.idea
 /backend
 backend/config.ini
 .txt
@@ -9,3 +10,4 @@ backend/config.ini
 /templates
 巡检模板.xlsx
 版本迭代功能.txt
+main.py
