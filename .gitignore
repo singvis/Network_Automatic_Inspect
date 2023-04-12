@@ -1,2 +1,9 @@
-config.ini
-*.txt
+backend/config.ini
+.txt
+LOG
+.log
+extra
+core
+backend
+templates
+巡检模板.xlsx
