@@ -1,0 +1,4 @@
+netmiko==3.4.0
+prettytable==3.3.0
+openpyxl==3.0.9
+configparser==5.3.0
