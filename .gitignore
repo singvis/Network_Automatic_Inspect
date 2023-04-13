@@ -1,13 +1,4 @@
-.idea
-/backend
 backend/config.ini
 .txt
-/LOG
+LOG
 .log
-/extra
-/core
-/backend
-/templates
-巡检模板.xlsx
-版本迭代功能.txt
-main.py
