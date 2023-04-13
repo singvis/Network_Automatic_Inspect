@@ -1,4 +1,9 @@
+backend
 backend/config.ini
+core
+extra
+templates
 .txt
 LOG
 .log
+.版本迭代功能.txt
