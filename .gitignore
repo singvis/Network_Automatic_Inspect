@@ -1,4 +1,5 @@
-backend
+.idea
+/backend/
 backend/config.ini
 core
 extra
