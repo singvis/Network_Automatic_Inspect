@@ -1,9 +1,9 @@
 .idea
-/backend/
+backend/
 backend/config.ini
-core
-extra
-templates
+core/
+extra/
+templates/
 .txt
 LOG
 .log
