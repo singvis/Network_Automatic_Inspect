@@ -4,23 +4,20 @@
 作者：by singvis
 微信公众号: 点滴技术
 B站：点滴技术
-update： 2020.08.03
-1.优化下打印输出
-2.windows环境格式化文件命令(replace特殊符号)
-
-update:2022.08.24
-1.增加华为conn_timeout参数
-
-update:2022.09.18
-1.更新disconnect()关闭会话
-
 欢迎大家关注，点赞 收藏 分享，3连击.
 """
+
+try:
+    from netmiko import __version__ as version
+
+    if version != "3.4.0":
+        print("建议将Netmiko版本调整为3.4.0.")
+except Exception as e:
+    print(f"Netmiko报错: {e}")
 
 import os
 import sys
 import logging
-import re
 import threading
 import platform
 import re
@@ -33,6 +30,7 @@ from netmiko import ConnectHandler
 from netmiko.ssh_exception import (NetMikoTimeoutException, AuthenticationException, SSHException)
 from netmiko.fortinet import FortinetSSH
 from netmiko.juniper import JuniperSSH
+from jinja2 import FileSystemLoader, Environment
 
 RE_HOSTNAME = {
     'huawei': re.compile(r"(?<=(\<|\[)).*?(?=(\>|\]))", re.IGNORECASE),  # <hostname> or [hostname]
@@ -43,6 +41,17 @@ RE_HOSTNAME = {
     'a10': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname-Active> or hostname-Active#
     'paloalto': re.compile(r"(?<=(@)).*?(?=(\(|\>))", re.IGNORECASE),  # admin@hostname(active)>,
     'juniper': re.compile(r".*?(?=(\-\>))", re.IGNORECASE),  # hostname->
+}
+
+RE_VENDOR = {
+    "huawei": re.compile('huawei', re.IGNORECASE),
+    "h3c": re.compile('hp_comware', re.IGNORECASE),
+    'cisco': re.compile('cisco', re.IGNORECASE),
+    'aruba': re.compile('aruba', re.IGNORECASE),
+    'a10': re.compile('a10', re.IGNORECASE),
+    'fortinet': re.compile('fortinet', re.IGNORECASE),
+    'paloalto': re.compile('paloalto', re.IGNORECASE),
+    'juniper': re.compile('juniper', re.IGNORECASE),
 }
 
 
@@ -90,11 +99,10 @@ class BackupConfig(object):
         self.pool = ThreadPool(10)  # 并发数
         self.queueLock = threading.Lock()  # 线程锁
         self.logtime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")  # 时间
-        self.log = self.log_dir()
-        self.FtpServer = '192.168.0.1'  # 填自己的Ftp Server
-        self.FtpUser = 'test'
-        self.FtpPassword = 'test@123'
-
+        self.log = self.log_dir()  # LOG一级目录
+        self.FtpServer = '192.168.0.1'  # Ftp Server
+        self.FtpUser = 'test'  # Ftp 用户名
+        self.FtpPassword = 'test@123'  # Ftp 密码
         self.success = []
         self.fail = []
 
@@ -131,7 +139,7 @@ class BackupConfig(object):
                         f.write('\n')
                 else:
                     # 正式环境,连接正常将采集结果写入文本
-                    with open(kwargs['path'], 'a') as f:  # LOG/2022-01-01_00:00:01/192.168.1.1_Router01/show run.conf
+                    with open(kwargs['path'], 'a') as f:
                         f.write(kwargs['result'])
             elif kwargs['action'] == 1:
                 # 连接测试结果写入文件
@@ -163,7 +171,7 @@ class BackupConfig(object):
 
             n = 0
             # 通过参数min_row、max_col限制区域
-            for row in ws1.iter_rows(min_row=2, max_col=9):
+            for row in ws1.iter_rows(min_row=2, max_col=10):
                 n += 1
                 if str(row[1].value).strip() == '#':
                     # 跳过注释行
@@ -176,6 +184,7 @@ class BackupConfig(object):
                              'secret': row[7].value,
                              'device_type': row[8].value,
                              'cmd_list': self.get_cmd_info(wb[row[8].value]) if row[8].value else '',
+                             'template_file': row[9].value,
                              }
 
                 yield info_dict
@@ -221,22 +230,71 @@ class BackupConfig(object):
 
     def format_cmd(self, cmd):
         # 格式化命令行
-        # 避免windown环境文件命令不允许特殊符号,按需修改
+        # windows文件命名不允许有特殊符号,按需修改
         if platform.system().lower() == 'windows':
-            cmd = cmd.replace('|', '_')
+            cmd = cmd.strip().replace('|', '_')
         else:
             cmd = cmd
         return cmd
+
+    def normalize_netmiko(self, host):
+        """标准化netmiko参数"""
+        new_host = {
+            'ip': host["ip"],
+            'port': host["port"],
+            'username': host["username"],
+            'password': host["password"],
+            'secret': host["secret"],
+            'device_type': host["device_type"],
+            'session_log': 'device_session.log'
+        }
+        return new_host
+
+    def normalize_vendor(self, device_type):
+        """标准化厂商名称"""
+        try:
+            for vendor, regex in RE_VENDOR.items():
+                match = re.search(regex, device_type)
+                if match:
+                    new_vendor = vendor
+                    return new_vendor
+                else:
+                    return device_type
+        except Exception as e:
+            raise ValueError(f"normalize_vendor错误: {e}.")
+
+    def create_dir(self, dirpath):
+        """
+        1.创建多级目录
+        2.这里要注意windows下文件命名不能有特殊符号，否则会创建失败
+        """
+        try:
+            if not os.path.exists(dirpath):
+                os.makedirs(dirpath)
+        except Exception as e:
+            self.printPretty(f"创建目录失败: {e}")
+
+    def render_jinjia2_tpl(self, vendor, template):
+        """
+        返回jinjia2模板内容
+        """
+        try:
+            loader = FileSystemLoader(os.path.join("templates", 'config', vendor))
+            env = Environment(loader=loader)
+            tpl = env.get_template(f"{template}")
+            return tpl.render()
+        except Exception as e:
+            self.printPretty(f"jinja2错误: {e}")
 
     def connectHandler(self, host, action=None):
         """定义一个netmiko对象"""
         try:
             connect = ''
-
             # 判断使用ssh协议
             if host['protocol'].lower().strip() == 'ssh':
                 host['port'] = host['port'] if (host['port'] not in [22, None]) else 22
-                host.pop('protocol'), host.pop('cmd_list')
+                # host.pop('protocol'), host.pop('cmd_list'), host.pop('cmd_list')
+                host = self.normalize_netmiko(host)
 
                 if 'huawei' in host['device_type']:
                     connect = ConnectHandler(**host, conn_timeout=15)
@@ -251,10 +309,11 @@ class BackupConfig(object):
             # 判断使用telnet协议
             elif host['protocol'].lower().strip() == 'telnet':
                 host['port'] = host['port'] if (host['port'] not in [23, None]) else 23
-                host.pop('protocol'), host.pop('cmd_list')
+                # host.pop('protocol'), host.pop('cmd_list')
                 # netmiko里面支持telnet协议，示例：cisco_ios_telnet
                 host['device_type'] = host['device_type'] + '_telnet'
 
+                host = self.normalize_netmiko(host)
                 # fast_cli=False，为了修复telnet login authentication 报错.
                 connect = ConnectHandler(**host, fast_cli=False)
             else:
@@ -331,9 +390,12 @@ class BackupConfig(object):
                     # 适用于ftp/sftp/scp备份
                     if host['device_type'] == 'fortinet':
                         # 飞塔防火墙FTP备份
-                        cmd = "execute backup config ftp {}_{}.conf {} {} {}".format(hostname, self.logtime,
-                                                                                     self.FtpServer,
-                                                                                     self.FtpUser, self.FtpPassword)
+                        cmd = "execute backup config ftp {}_{}.conf {} {} {}".format(
+                            hostname,
+                            self.logtime,
+                            self.FtpServer,
+                            self.FtpUser, self.FtpPassword
+                        )
                         conn.send_command(cmd, expect_string="to ftp server OK")
                     elif host['device_type'] == 'cisco_wlc':
                         # 按需补充
@@ -352,6 +414,75 @@ class BackupConfig(object):
             finally:
                 # 退出netmiko session
                 conn.disconnect()
+
+    def run_config_cmd(self, host, action=0):
+        """
+        执行配置命令并保存当前配置
+        """
+        self.printPretty('设备...{:.<15}...开始执行配置'.format(host['ip']))
+
+        # 特权功能标识位
+        enable = True if host['secret'] else False
+        #
+        conn = self.connectHandler(host, action=action)
+
+        if conn:
+            # 获取设备名称并格式化
+            hostname = self.format_hostname(conn.find_prompt(), host['device_type'])
+            # 格式示例：192.168.1.1_Router01
+            dirname = host['ip'] + '_' + hostname
+            # 目录格式：LOG/2022-01-01_00:00:00
+            dirpath = os.path.join(self.log, self.logtime)
+            # 创建多级目录
+            self.create_dir(dirpath)
+
+            try:
+                cmds_str = self.render_jinjia2_tpl(self.normalize_vendor(host['device_type']), host['template_file'])
+                cmds = [cmd.strip() for cmd in cmds_str.splitlines()]
+
+                output = ''
+                for cmd in cmds:
+                    if enable:
+                        # 进入特权模式
+                        if 'cisco' or 'ruijie' in host['device_type']:
+                            # 默认源码只有cisco支持enabel命令，国产的super需要改写
+                            conn.enable()
+                            output += conn.send_config_set(cmd, exit_config_mode=False)
+                        else:
+                            # 占位，其他厂商
+                            pass
+                    else:
+                        output += conn.send_config_set(cmd, exit_config_mode=False)
+
+                # 退出配置模式
+                output += conn.exit_config_mode()
+                # 保存设备当前配置
+                output += conn.save_config()
+
+                # 写入文件
+                data = {
+                    'action': action,
+                    'code': 0,
+                    'result': output,
+                    'path': os.path.join(dirpath, f'{hostname}_Config_Record.txt')
+                }
+                self.write_to_file(**data)
+                # 追加到成功列表
+                self.success.append(host['ip'])
+
+            except Exception as e:
+                self.printPretty(f"run Failed...{host['ip']} : {e}")
+                # 写入文件
+                self.write_to_file({'action': action, 'code': 1, 'result': str(e)})
+                # 追加到失败列表
+                self.fail.append(host['ip'])
+
+            finally:
+                # 退出netmiko session
+                conn.disconnect()
+
+    def run_ping(self):
+        pass
 
     def run_t(self, host, action=1):
         """主要获取设备名称提示符"""
@@ -408,6 +539,20 @@ class BackupConfig(object):
         end_time = datetime.now()
         self.printSum(end_time - start_time)
 
+    def connect_config(self):
+        """主程序"""
+        start_time = datetime.now()
+
+        # hosts 是一个生成器，需要for循环进行遍历
+        hosts = self.get_devices_info()
+        for host in hosts:
+            self.pool.apply_async(self.run_config_cmd, args=(host,))
+        self.pool.close()
+        self.pool.join()
+
+        end_time = datetime.now()
+        self.printSum(end_time - start_time)
+
 
 if __name__ == '__main__':
     # 开启debug，用于分析后台执行记录结果，方便定位问题
@@ -419,19 +564,32 @@ if __name__ == '__main__':
     功能列表：
     1. 连接测试.
     2. 采集设备信息.
+    3. 批量配置设备
+    4. 批量ping
     """
     print(text)
 
+    net = BackupConfig()
     choice_function = input("请选择: ")
     if choice_function == '1':
         # 测试连接
         print('^' * 100)
-        BackupConfig().connect_t()
+        net.connect_t()
         print('^' * 100)
     elif choice_function == '2':
         # 开始采集设备信息
         print('^' * 100)
-        BackupConfig().connect()
+        net.connect()
+        print('^' * 100)
+    elif choice_function == '3':
+        # 开始配置设备
+        print('^' * 100)
+        net.connect_config()
+        print('^' * 100)
+    elif choice_function == '4':
+        # 开始ping设备
+        print('^' * 100)
+        pass
         print('^' * 100)
     else:
         print("没有这个功能!")
