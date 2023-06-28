@@ -43,6 +43,7 @@ RE_HOSTNAME = {
     'a10': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname-Active> or hostname-Active#
     'paloalto': re.compile(r"(?<=(@)).*?(?=(\(|\>))", re.IGNORECASE),  # admin@hostname(active)>,
     'juniper': re.compile(r".*?(?=(\-\>))", re.IGNORECASE),  # hostname->
+    'linux': re.compile(r"(?<=(\[)).*?(?=(~|]))", re.IGNORECASE),
 }
 
 
@@ -209,7 +210,7 @@ class BackupConfig(object):
                 if vendor in device_type:
                     match = re.search(regex, hostname)
                     if match:
-                        new_hostname = match.group(0)
+                        new_hostname = match.group(0).strip()
                     else:
                         new_hostname = hostname.split()[0].strip("<>#$()[] ")
 
