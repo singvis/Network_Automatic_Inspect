@@ -4,17 +4,6 @@
 作者：by singvis
 微信公众号: 点滴技术
 B站：点滴技术
-update： 2020.08.03
-1.优化下打印输出
-2.windows环境格式化文件命令(replace特殊符号)
-
-update:2022.08.24
-1.增加华为conn_timeout参数
-
-update:2022.09.18
-1.更新disconnect()关闭会话
-
-欢迎大家关注，点赞 收藏 分享，3连击.
 """
 
 import os
