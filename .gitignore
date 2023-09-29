@@ -1,10 +1,11 @@
 .idea
 backend/
 backend/config.ini
-core/
+utils/
 extra/
 templates/
+test/
 .txt
-LOG
+LOG/
 .log
-.版本迭代功能.txt
+.git

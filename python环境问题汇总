@@ -1,0 +1,5 @@
+1# pysnmp模块
+问题：TypeError: decodeMessageVersion.<locals>.<lambda>() takes 3 positional arguments but 4 were given
+解决：pyasn1==0.4.8
+
+
