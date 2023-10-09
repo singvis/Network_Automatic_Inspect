@@ -244,7 +244,7 @@ class NetAutoTool(object):
             if self.ssh_detect:
                 pass
         except Exception as e:
-            self.printPretty("detect_devicetype err: {str(e)}".format(e))
+            self.printPretty("detect_devicetype err: {}".format(str(e)))
             return "autodetect"
 
     def write_to_file(self, *args, **kwargs):
@@ -276,6 +276,7 @@ class NetAutoTool(object):
 
     def format_hostname(self, hostname, device_type):
         """格式化主机名称"""
+        new_hostname = ''
         try:
             for vendor, regex in RE_HOSTNAME.items():
                 if vendor in device_type:
@@ -285,11 +286,11 @@ class NetAutoTool(object):
                     else:
                         new_hostname = hostname.split()[0].strip("<>#$()[] ")
 
+            return new_hostname
+
         except Exception as e:
             self.printPretty(e)
             raise e
-
-        return new_hostname
 
     def format_cmd(self, cmd):
         # 格式化命令行
@@ -385,39 +386,38 @@ class NetAutoTool(object):
             self.printPretty(output)
             self.fail.append(host['ip'])
             self.write_to_file(**{'code': 0, 'result': str(output)})
-            return False
+            raise ValueError(output)
 
     @async_task  # 等价于 run_t = async_task(run_t)
     def run_t(self, host):
         """主要获取设备名称提示符"""
         self.printPretty('设备...{:.<15}...开始测试连接'.format(host['ip']))
-
         dir_flag = "device_test"
         conn = self.connectHandler(host)
-        if conn:
-            try:
-                output = "获取设备的提示符: {}".format(conn.find_prompt())
-                self.printPretty(output)
-                self.success.append(host['ip'])  # 追加到成功的列表
-                self.write_to_file(**{
-                    'code': 1,
-                    'result': output,
-                    'path': os.path.join(self.log, dir_flag, f"connect_test_{self.logtime}.log")
-                })
 
-            except Exception as e:
-                output = f"run_t failed...{host['ip']} : {e}"
-                self.printPretty(output)
-                self.fail.append(host['ip'])
-                self.write_to_file(**{
-                    'code': 0,
-                    'result': output,
-                    'path': os.path.join(self.log, dir_flag, f"connect_test_{self.logtime}.log")
-                })
+        try:
+            output = "获取设备的提示符: {}".format(conn.find_prompt())
+            self.printPretty(output)
+            self.success.append(host['ip'])  # 追加到成功的列表
+            # self.write_to_file(**{
+            #     'code': 1,
+            #     'result': output,
+            #     'path': os.path.join(self.log, dir_flag, f"connect_test_{self.logtime}.log")
+            # })
 
-            finally:
-                # 退出netmiko session
-                conn.disconnect()
+        except Exception as e:
+            output = f"run_t failed...{host['ip']} : {e}"
+            self.printPretty(output)
+            self.fail.append(host['ip'])
+            self.write_to_file(**{
+                'code': 0,
+                'result': output,
+                'path': os.path.join(self.log, dir_flag, f"connect_test_{self.logtime}.log")
+            })
+
+        finally:
+            # 退出netmiko session
+            conn.disconnect()
 
     @async_task
     def run_cmd(self, host, cmds, action=1):
@@ -557,7 +557,7 @@ class NetAutoTool(object):
                 conn.disconnect()
 
     def run_ping(self):
-        print("for ping test...")
+        pass
 
 
 if __name__ == '__main__':

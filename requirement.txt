@@ -3,3 +3,4 @@ prettytable
 openpyxl
 configparser
 rich
+pyasn1==0.4.8
