@@ -210,10 +210,10 @@ class BackupConfig(object):
         return new_hostname
 
     def format_cmd(self, cmd):
-        # 格式化命令行
+        """格式化命令行"""
         # 避免windown环境文件命令不允许特殊符号,按需修改
         if platform.system().lower() == 'windows':
-            cmd = cmd.replace('|', '_')
+            cmd = re.sub(r'[\\/:\*\?"<>\|]', '_', cmd)
         else:
             cmd = cmd
         return cmd
