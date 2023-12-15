@@ -4,10 +4,12 @@
 import os
 import configparser
 
+from pathlib import Path
+
 
 class Config(object):
     def __init__(self, config_file='config.ini'):
-        self._path = os.path.join(os.getcwd(), config_file)
+        self._path = os.path.join(os.path.dirname(os.path.abspath(__file__)), config_file)
         if not os.path.exists(self._path):
             raise FileNotFoundError("找不到文件: config.ini")
         self.cf = configparser.ConfigParser()
