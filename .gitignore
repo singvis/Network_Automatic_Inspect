@@ -5,6 +5,8 @@ utils/
 extra/
 templates/
 test/
+cache/
+config.ini
 .txt
 LOG/
 .log

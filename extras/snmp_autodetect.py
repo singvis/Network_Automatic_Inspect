@@ -8,17 +8,25 @@ from netmiko.snmp_autodetect import SNMPDetect
 
 # 华为有VRP和YunShan两个操作系统
 SNMP_MAPPER_BASE = OrderedDict({
-    "hp_comware": {
+    "hp_comware": {  # H3C
         "oid": ".1.3.6.1.2.1.1.1.0",
         "expr": re.compile(r".*H3C Comware.*", re.IGNORECASE),
     },
-    "huawei_vrpv8": {
+    "huawei_vrpv8": {  # 华为V8版本
         "oid": ".1.3.6.1.2.1.1.1.0",
         "expr": re.compile(r".*VRP\s+\(R\)\s+software,\s*Version\s+8.*", re.IGNORECASE),
     },
     "huawei": {
         "oid": ".1.3.6.1.2.1.1.1.0",
         "expr": re.compile(r"(.*VRP\s+\(R\)\s+software,\s*Version.*)|(.*Huawei\s+YunShan\s+OS.*)", re.IGNORECASE),
+    },
+    "ruijie_os": {  # 锐捷
+        "oid": ".1.3.6.1.2.1.1.1.0",
+        "expr": re.compile(r"(.*Ruijie.*)", re.IGNORECASE),
+    },
+    "hillstone": {  # 山石
+        "oid": ".1.3.6.1.2.1.1.1.0",
+        "expr": re.compile(r"(.[Hh]ill[Ss]tone.*)", re.IGNORECASE),
     },
     "cisco_ios": {
         "oid": ".1.3.6.1.2.1.1.1.0",
