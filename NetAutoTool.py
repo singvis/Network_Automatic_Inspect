@@ -29,17 +29,19 @@ except ImportError:
     print("未安装Netmiko模块")
 except Exception as err:
     print(f"Netmiko报错: {err}")
-
 from config import global_config
 from typing import Union
 from functools import wraps
 from datetime import datetime
 from openpyxl.reader.excel import load_workbook
 from prettytable import PrettyTable
-from extras.ssh_dispatcher import (MyFortinetSSH, MyJuniperSSH)
+from extras.ssh_dispatcher import (FortinetSSH, JuniperSSH, FiberHomeSSH, HillStoneSSH, MaipuSSH)
 from extras.snmp_autodetect import MySNMPDetect
+from extras.ssh_autodetect import MySSHDetect
 from jinja2 import FileSystemLoader, Environment
 from netmiko import ConnectHandler
+from netmiko.ssh_exception import NetMikoAuthenticationException, NetmikoTimeoutException
+from netmiko.ssh_autodetect import SSHDetect
 from gevent.lock import BoundedSemaphore
 from utils.RichTool import RichTool
 from utils.ping import Ping
@@ -72,11 +74,10 @@ def async_task(wrapped):
     """
     装饰器
     """
-
     @wraps(wrapped)
     def wrapper(self, *args, **kwargs):
         start_time = datetime.now()
-
+        # print(f"args:{args}, kwargs:{kwargs}")
         greenlets = [self.async_pool.spawn(wrapped, self, arg) for arg in args[0]]
         gevent.joinall(greenlets)
 
@@ -105,6 +106,7 @@ class NetAutoTool(object):
         # log时间与目录
         self.logtime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")  # 日期时间
         self.log = "LOG"
+        self.show_dir, self.config_dir, self.ping_dir, self.scan_dir = 'show', 'config', 'ping', "scan"
         self.fail_file = f"fail_{self.logtime}.log"
 
         # ftp服务器
@@ -128,41 +130,34 @@ class NetAutoTool(object):
         # 开关debug
         self.enableDebug()
 
-        # 创建文件夹
-        # dir_list = ["device_test", "device_show", "device_config", "device_save", "ping", "scan_port", "scan_asset"]
-        # for _dir in dir_list:
-        #     _dir = os.path.join("LOG", _dir)
-        #     os.makedirs(_dir, exist_ok=True)
-
         # rich
         self.rich = RichTool
 
-    def enableDebug(self):
+    def enableDebug(self) -> None:
         if global_config.get('debug', 'debug').lower() == 'true':
             print("已开启debug模式...")
             logging.basicConfig(filename='debug.log', level=logging.DEBUG)
             logging.getLogger("netmiko")
 
-    def printPretty(self, msg):
+    def printPretty(self, msg:str) -> str:
         """打印消息"""
         with self.geventLock:
             print(msg)
 
-    def printSum(self, total_time):
+    def printSum(self, total_time) -> None:
         """打印结果汇总信息"""
         total_devices, success, fail = len(self.success + self.fail), len(self.success), len(self.fail)
         tb = PrettyTable(['设备总数', '成功', '失败', '总耗时'])
         tb.add_row([total_devices, success, fail, "{:0.2f}s".format(total_time)])
         print(tb)
 
-    def time_now(self):
+    def time_now(self) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-4]
 
-    def load_excel(self):
+    def load_excel(self) -> load_workbook:
         """加载excel文件"""
         try:
-            wb = load_workbook(self.device_file)
-            return wb
+            return load_workbook(self.device_file)
         except FileNotFoundError:
             raise FileNotFoundError("{} 文件不存在.".format(self.device_file))
         except Exception as e:
@@ -173,10 +168,10 @@ class NetAutoTool(object):
         通过nscan扫描出来的参数临时写入cache文件
         再回填到excel，可减少下scan动作
         """
-        port = row[4].value if row[4].value else self.scan_port(ip=row[2].value, port=self.device_port)
-        if not port:
-            return {}  # 如果port扫描不通，则不往下执行
         try:
+            port = row[4].value if row[4].value else self.scan_port(ip=row[2].value, port=self.device_port)
+            if not port:
+                return {}  # 如果port扫描不通，则不往下执行
             info_dict = {
                 'ip': row[2].value,
                 'protocol': row[3].value,
@@ -184,33 +179,41 @@ class NetAutoTool(object):
                 'username': row[5].value if row[5].value else global_config.get('account', 'username').strip(),
                 'password': row[6].value if row[6].value else global_config.get('account', 'password').strip(),
                 'secret': row[7].value if row[7].value else global_config.get('account', 'secret').strip(),
-                'device_type': row[8].value if row[8].value else self.detect_deviceType(row[2].value),  # 可自动扫描
-                'cmd_list': self.get_cmd_info(wb[row[8].value]) if row[8].value else '',
                 'template_file': row[9].value,
             }
+            device_type = row[8].value if row[8].value else self.detect_deviceType(
+                ip=row[2].value,
+                username=info_dict.get("username"),
+                password=info_dict.get('password'),
+                secret=info_dict.get('secret'),
+            )
+            info_dict['cmd_list'] = self.get_cmd_info(wb, device_type)
+            info_dict['device_type'] = device_type
+            # print(info_dict)
+
             return info_dict
 
         except Exception as e:
-            output = f"Excel_Error: {e}"
-            self.rich.errPrint(output)
-            self.write_to_file(**{'code': 0, 'result': output, 'path': os.path.join(self.log, self.fail_file)})
+            error = f"Excel__Error: {e}"
+            raise ValueError(error)
 
-    def get_devices_info_async(self) -> list:
+    def get_devices_info_async(self) -> list[dict]:
         """
         如启用了nmap，通过异步方式减少scan等待时间
         return: 列表
         """
-        row_num = ''  # 行编号
-        wb = self.load_excel()  # 工作薄对象
+        wb = None
+        row_num = None
         try:
+            wb = self.load_excel()  # 工作薄对象
             first_sheet = wb[wb.sheetnames[0]]  # 获取第一个sheet
             results = []
-            for row in first_sheet.iter_rows(min_row=2, max_col=10):  # 通过参数min_row、max_col限制区域范围
+            for row in first_sheet.iter_rows(min_row=2, max_col=10):  # 通过参数min_row/max_col限制区域范围
                 row_num = row[0].row  # 行编号
                 if row[1].value == '#':
                     continue  # 跳过注释行
                 elif not self.validate_ip_address(row[2].value):
-                    continue  # 跳过IP地址格式不正确
+                    continue  # 跳过有误的IP地址格式
                 else:
                     greenlet = gevent.spawn(self.get_devices_info, wb, row)
                     results.append(greenlet)
@@ -228,21 +231,21 @@ class NetAutoTool(object):
                     greenlet.value.get("port") and
                     greenlet.value.get("device_type")) is not False
             ]
-
             # 写入缓存文件
             self.cache_data(device_info_list)
 
             return device_info_list
 
         except Exception as e:
-            output = f"Excel_第{row_num}行_错误: {str(e)}"
-            # self.printPretty(output)
-            self.rich.errPrint(output)
+            error = f"Excel_第{row_num}行_错误: {str(e)}"
+            self.rich.errPrint(error)
+            self.write_to_file(**{'code': 0, 'result': error, 'path': os.path.join(self.log, self.fail_file)})
+            # raise ValueError(error)
 
         finally:
             wb.close()  # 记得最后要关闭workbook
 
-    def validate_ip_address(self, ip: str):
+    def validate_ip_address(self, ip: str) -> bool:
         """
         校验IPv4地址格式
         """
@@ -271,12 +274,11 @@ class NetAutoTool(object):
             self.write_to_file(**{'code': 0, 'result': str(output), 'path': os.path.join(self.log, self.fail_file)})
             return False
 
-    def nscan(self):
+    def nscan(self) -> nmap.PortScanner():
         """nmap实例"""
-        _nscan = nmap.PortScanner()
-        return _nscan
+        return nmap.PortScanner()
 
-    def scan_port(self, *args, **kwargs):
+    def scan_port(self, *args, **kwargs) -> Union[str, bool]:
         """扫描设备端口"""
         try:
             ip = kwargs.get('ip')  # ip地址
@@ -302,18 +304,15 @@ class NetAutoTool(object):
             self.rich.errPrint(str(e))
             return False
 
-    def detect_deviceType(self, ip: str):
+    def detect_deviceType(self, *args, **kwargs) -> Union[str, bool]:
         """检测设备类型"""
-        # self.printPretty("{} Start detecting device_type...{}".format(self.time_now(), ip))
-
-        item = self.load_cache_data(ip)
-        if item:
-            # 如果缓存有，则直接返回数据
-            return item.get("device_type")
-        else:
-            try:
+        try:
+            ip = kwargs.get("ip")
+            item = self.load_cache_data(ip)
+            if item:
+                return item.get("device_type")  # 如果缓存有，则直接返回数据
+            else:
                 self.rich.print("{} Start detecting device_type...{}".format(self.time_now(), ip))
-
                 # snmp探测
                 if self.snmp_detect == 'true' and self.comunity:
                     device_type = MySNMPDetect(
@@ -325,46 +324,49 @@ class NetAutoTool(object):
                     if device_type:
                         return device_type
                     else:
-                        output = "{:<20} snmp不通,请检查!".format(ip)
-                        # self.printPretty(output)
-                        self.rich.errPrint(output)
-                        return False
+                        # output = "{:<20} snmp不通,请检查!".format(ip)
+                        # self.rich.errPrint(output)
+                        # return False
+                        raise ValueError("{:<20} SNMP: 设备类型(device_type)检测失败!".format(ip))
                 # ssh探测
                 if self.ssh_detect:
-                    pass
-            except Exception as e:
-                # self.printPretty("detect_deviceType err: {}".format(str(e)))
-                self.rich.errPrint("detect_deviceType err: {}".format(str(e)))
-                # return "autodetect"
-                return False
+                    kwargs['device_type'] = "autodetect"
+                    ssh = MySSHDetect(**kwargs)
+                    device_type = ssh.autodetect()
+                    # print(f"device_type: {device_type}")
+                    if device_type:
+                        return device_type
+                    else:
+                        raise ValueError("{:<20} SSH: 设备类型(device_type)检测失败!".format(ip))
 
-    def write_to_file(self, *args, **kwargs):
+        except Exception as e:
+            self.rich.errPrint("设备类型检测错误: {}".format(str(e)))
+            return False
+
+    def write_to_file(self, *args, **kwargs) -> None:
         """
         将结果写入文件
         """
         try:
-            # self.queueLock.acquire()
             with self.geventLock:
                 with open(kwargs['path'], mode='a', encoding='utf-8') as f:
                     f.write(kwargs['result'] + "\n")
         except Exception as e:
-            # self.printPretty(str(e))
-            self.rich.errPrint(str(e))
+            self.rich.errPrint(f"写入文件错误: {e}")
 
-    def get_cmd_info(self, cmd_sheet) -> list:
-        """获取命令的信息"""
+    def get_cmd_info(self, wb, sheet_name) -> list:
+        """获取命令条目的信息"""
         cmd_list = []
         try:
+            cmd_sheet = wb[sheet_name]
             for row in cmd_sheet.iter_rows(min_row=2, max_col=2):
                 if str(row[0].value).strip() != "#" and row[1].value:
                     # 跳过注释行，去掉命令左右空白处
                     cmd_list.append(row[1].value.strip())
-
             return cmd_list
 
-        except Exception as e:
-            self.printPretty("get_cmd_info Error: {}".format(e))
-            self.rich.errPrint("get_cmd_info Error: {}".format(e))
+        except KeyError as e:
+            raise KeyError(f"找不到sheet名称: {sheet_name}")
 
     def format_hostname(self, hostname, device_type) -> str:
         """格式化主机名称"""
@@ -419,22 +421,18 @@ class NetAutoTool(object):
         except Exception as e:
             raise ValueError(f"normalize_vendor错误: {e}.")
 
-    def create_dir(self, dirpath):
+    def create_dir(self, dir_name) -> None:
         """
-        创建多级目录
-        windows环境下要注意文件命名不能有特殊符号，否则会创建失败
+        创建目录
         """
         try:
-            # self.queueLock.acquire()
             with self.geventLock:
-                os.makedirs(dirpath, exist_ok=True)
+                os.makedirs(os.path.join(self.log, dir_name), exist_ok=True)
         except Exception as e:
-            err = f"创建目录失败: {e}"
-            # self.printPretty(err)
-            self.rich.errPrint(err)
-            raise err
+            output = f"创建目录失败: {e}"
+            self.rich.errPrint(output)
 
-    def render_jinjia2_tpl(self, vendor, template):
+    def render_jinjia2_tpl(self, vendor: str, template: str) -> str:
         """
         返回jinjia2模板内容
         """
@@ -446,7 +444,7 @@ class NetAutoTool(object):
         except Exception as e:
             raise ValueError(f"render_jinja2_err: {e}")
 
-    def cache_data(self, data):
+    def cache_data(self, data: list[dict]) -> None:
         """
         将自动探测的参数写入文件，作为缓存数据
         """
@@ -473,7 +471,7 @@ class NetAutoTool(object):
             # self.rich.errPrint(f"加载缓存文件错误：{str(err)}")
             return None
 
-    def clear_cache_data(self):
+    def clear_cache_data(self) -> None:
         """
         清理设备的缓存信息
         """
@@ -481,14 +479,13 @@ class NetAutoTool(object):
             f.truncate(0)
         self.rich.print("设备缓存数据已清除!")
 
-    def connectHandler(self, host):
+    def connectHandler(self, host: dict) -> ConnectHandler:
         """定义一个netmiko对象"""
         try:
             connect = ''
             # 判断使用telnet协议
             if host['port'] == 23:
-                # netmiko里面支持telnet协议，示例：cisco_ios_telnet
-                # fast_cli=False，为了修复telnet login authentication报错.
+                # fast_cli=False，可修复telnet login authentication报错.
                 host['device_type'] = f"{host['device_type']}_telnet"
                 host = self.normalize_netmiko(host)
                 connect = ConnectHandler(**host, fast_cli=False)
@@ -497,133 +494,134 @@ class NetAutoTool(object):
                 host = self.normalize_netmiko(host)
                 if 'huawei' in host['device_type']:
                     connect = ConnectHandler(**host, conn_timeout=15)
-                # elif 'fortinet' in host['device_type']:
-                #     # 调用重写的MyFortinetSSH类
-                #     connect = MyFortinetSSH(**host)
-                # elif 'juniper' in host['device_type']:
-                #     # 优化netscreen设备(优化分屏命令)
-                #     connect = MyJuniperSSH(**host)
+                elif 'fortinet' in host['device_type']:
+                    # 调用重写的MyFortinetSSH类
+                    connect = FortinetSSH(**host)
+                elif 'juniper' in host['device_type']:
+                    # 优化netscreen设备(优化分屏命令)
+                    connect = JuniperSSH(**host)
+                elif 'maipu' in host['device_type']:      # 支持迈普厂商
+                    connect = MaipuSSH(**host)
+                elif 'fiberhome' in host['device_type']:  # 支持烽火厂商
+                    connect = FiberHomeSSH(**host)
+                elif 'hillstone' in host['device_type']:  # 支持山石厂商
+                    connect = HillStoneSSH(**host)
                 else:
                     connect = ConnectHandler(**host)
             return connect
 
         # 异常捕获
+        except NetMikoAuthenticationException:
+            output = "Failed.....{:<15}  用户名或密码认证失败!".format(host['ip'])
+            raise ValueError(output)
+        except NetmikoTimeoutException:
+            output = "Failed.....{:<15}  连通性问题!".format(host['ip'])
+            raise ValueError(output)
         except Exception as e:
-            output = "Failed.....{:<15} connectHandler Error: {}".format(host['ip'], e)
-            # self.printPretty(output)
-            self.rich.errPrint(output)
-            self.fail.append(host['ip'])
-            self.write_to_file(**{'code': 0, 'result': str(output)})
+            output = "Failed.....{:<15} 连接失败!: {}".format(host['ip'], e)
             raise ValueError(output)
 
     @async_task  # 等价于 run_t = async_task(run_t)
-    def run_t(self, host):
+    def run_t(self, host: list) -> None:
         """
         主要获取设备名称提示符
         """
-        # self.printPretty('{} Start connecting device...{:<15}'.format(self.time_now(), host['ip']))
         self.rich.print('{} Start connecting device...{:<15}'.format(self.time_now(), host['ip']))
-        dir_flag = "device_test"
-        conn = self.connectHandler(host)
-
         try:
+            conn = self.connectHandler(host)
             output = "获取设备的提示符: {}".format(conn.find_prompt())
-            # self.printPretty(output)
             self.rich.print(output)
             self.success.append(host['ip'])  # 追加到成功的列表
             self.write_to_file(**{
                 'code': 1,
                 'result': output,
-                'path': os.path.join(self.log, dir_flag, f"connect_test_{self.logtime}.log")
+                'path': os.path.join(self.log, f"connect_test_{self.logtime}.log")
             })
 
+            # 退出netmiko session
+            conn.disconnect()
+
         except Exception as e:
-            output = f"run_t failed...{host['ip']} : {e}"
-            # self.printPretty(output)
-            self.rich.errPrint(output)
+            self.rich.errPrint(e)
             self.fail.append(host['ip'])
             self.write_to_file(**{
                 'code': 0,
-                'result': output,
-                'path': os.path.join(self.log, dir_flag, f"connect_test_{self.logtime}.log")
+                'result': str(e),
+                'path': os.path.join(self.log, f"connect_test_{self.logtime}.log")
             })
+
+    @async_task
+    def run_cmd(self, host: dict, action=1) -> None:
+        """获取设备配置"""
+        self.rich.print('设备...{:.<15}...开始执行'.format(host['ip']))
+        try:
+            # show命令条目
+            cmds = host['cmd_list']
+            # 特权功能标识位
+            enable = True if host['secret'] else False
+            # netmiko对象
+            conn = self.connectHandler(host)
+            # 设备名称
+            hostname = self.format_hostname(conn.find_prompt(), host['device_type'])
+            # 存放目录名称
+            dirname = host['ip'] + '_' + hostname  # 192.168.1.1_Router-01
+            # 创建目录
+            dirpath = os.path.join(self.log, self.show_dir, self.logtime, dirname)
+            self.create_dir(dirpath)
+
+            if cmds:
+                for cmd in cmds:
+                    if enable:
+                        # 进入特权模式
+                        if 'huawei' or 'hp_comware' in host['device_type']:
+                            # 默认源码只有cisco支持enabel命令，国产的super需要改写
+                            conn.enable()
+                            output = conn.send_command(cmd)
+                            data = {'action': action, 'code': 1, 'result': output,
+                                    'path': os.path.join(dirpath, self.format_cmd(cmd) + '.conf')}
+                            self.write_to_file(**data)
+                        else:
+                            conn.enable()
+                            output = conn.send_command(cmd)
+                            data = {'action': action, 'code': 1, 'result': output,
+                                    'path': os.path.join(dirpath, self.format_cmd(cmd) + '.conf')}
+                            self.write_to_file(**data)
+                    else:
+                        output = conn.send_command(cmd)
+                        data = {'action': action, 'code': 1, 'result': output,
+                                'path': os.path.join(dirpath, self.format_cmd(cmd) + '.conf')}
+                        self.write_to_file(**data)
+            else:
+                # 适用于ftp/sftp/scp备份
+                if host['device_type'] == 'fortinet':
+                    # 飞塔防火墙FTP备份
+                    cmd = "execute backup config ftp {}_{}.conf {} {} {}".format(
+                        hostname,
+                        self.logtime,
+                        self.FtpServer,
+                        self.FtpUser, self.FtpPassword
+                    )
+                    conn.send_command(cmd, expect_string="to ftp server OK")
+                elif host['device_type'] == 'cisco_wlc':
+                    # 按需补充
+                    pass
+                else:
+                    pass
+
+            self.success.append(host['ip'])
+
+        except Exception as e:
+            output = f"run Failed...{host['ip']} : {e}"
+            self.rich.errPrint(output)
+            self.fail.append(host['ip'])
+            self.write_to_file({'action': action, 'code': 0, 'result': str(e)})
 
         finally:
             # 退出netmiko session
             conn.disconnect()
 
-    @async_task
-    def run_cmd(self, host, cmds, action=1):
-        """获取设备配置"""
-        # self.printPretty('设备...{:.<15}...开始执行'.format(host['ip']))
-        self.rich.print('设备...{:.<15}...开始执行'.format(host['ip']))
-
-        # 特权功能标识位
-        enable = True if host['secret'] else False
-
-        conn = self.connectHandler(host)
-
-        if conn:
-            # 获取设备名称并格式化
-            hostname = self.format_hostname(conn.find_prompt(), host['device_type'])
-            dirname = host['ip'] + '_' + hostname  # 192.168.1.1_Router-01
-
-            # 创建目录
-            dirpath = os.path.join(self.log, "device_show", self.logtime, dirname)
-            self.create_dir(dirpath)
-
-            try:
-                if cmds:
-                    for cmd in cmds:
-                        if enable:
-                            # 进入特权模式
-                            if 'cisco' or 'ruijie' in host['device_type']:
-                                # 默认源码只有cisco支持enabel命令，国产的super需要改写
-                                conn.enable()
-                                output = conn.send_command(cmd)
-                                data = {'action': action, 'code': 1, 'result': output,
-                                        'path': os.path.join(dirpath, self.format_cmd(cmd) + '.conf')}
-                                self.write_to_file(**data)
-                            else:
-                                # 留空，拓展其他厂商
-                                pass
-                        else:
-                            output = conn.send_command(cmd)
-                            data = {'action': action, 'code': 1, 'result': output,
-                                    'path': os.path.join(dirpath, self.format_cmd(cmd) + '.conf')}
-                            self.write_to_file(**data)
-                else:
-                    # 适用于ftp/sftp/scp备份
-                    if host['device_type'] == 'fortinet':
-                        # 飞塔防火墙FTP备份
-                        cmd = "execute backup config ftp {}_{}.conf {} {} {}".format(
-                            hostname,
-                            self.logtime,
-                            self.FtpServer,
-                            self.FtpUser, self.FtpPassword
-                        )
-                        conn.send_command(cmd, expect_string="to ftp server OK")
-                    elif host['device_type'] == 'cisco_wlc':
-                        # 按需补充
-                        pass
-                    else:
-                        pass
-
-                self.success.append(host['ip'])
-
-            except Exception as e:
-                output = f"run Failed...{host['ip']} : {e}"
-                # self.printPretty(output)
-                self.rich.errPrint(output)
-                self.fail.append(host['ip'])
-                self.write_to_file({'action': action, 'code': 0, 'result': str(e)})
-
-            finally:
-                # 退出netmiko session
-                conn.disconnect()
-
     # @async_task
-    def run_config_cmd(self, host, action=1):
+    def run_config_cmd(self, host: dict, action=1) -> None:
         """
         执行配置命令并保存当前配置
         """
@@ -694,11 +692,11 @@ class NetAutoTool(object):
                 # 退出netmiko session
                 conn.disconnect()
 
-    def run_ping(self):
+    def run_ping(self) -> None:
         """ping 目标IP地址"""
         pass
 
-    def execute_connect(self):
+    def execute_connect(self) -> None:
         """
         连接测试
         """
@@ -706,26 +704,27 @@ class NetAutoTool(object):
         host = self.get_devices_info_async()  # 列表嵌套字典
         self.run_t(host)
 
-    def execute_getConfig(self):
+    def execute_getConfig(self) -> None:
         """
         下发设备配置
         """
+        self.create_dir(self.show_dir)
         host = self.get_devices_info_async()  # 列表嵌套字典
-        self.run_cmd()
+        self.run_cmd(host)
 
-    def execute_sendConfig(self):
+    def execute_sendConfig(self) -> None:
         """
         下发设备配置
         """
         pass
 
-    def execute_saveConfig(self):
+    def execute_saveConfig(self) -> None:
         """
         保存设备配置
         """
         pass
 
-    def execute_ping(self):
+    def execute_ping(self) -> None:
         """
         ping 测试
         """
@@ -740,5 +739,5 @@ if __name__ == '__main__':
     # print("耗时：{:0.2f}".format((end_time - start_time).total_seconds()))
 
     net = NetAutoTool()
-    net.get_devices_info_async()
+    net.execute_getConfig()
 
