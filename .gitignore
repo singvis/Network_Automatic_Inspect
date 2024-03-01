@@ -11,3 +11,4 @@ config.ini
 LOG/
 .log
 .git
+.xlsx
