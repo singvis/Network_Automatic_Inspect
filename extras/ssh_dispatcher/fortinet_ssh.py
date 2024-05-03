@@ -5,7 +5,7 @@ import re
 from netmiko.fortinet import FortinetSSH
 
 
-class FortinetSSH(FortinetSSH):
+class CustomFortinetSSH(FortinetSSH):
     """重写了FortinetSSH类"""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
