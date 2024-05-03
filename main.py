@@ -4,8 +4,7 @@ from utils.RichTool import RichTool
 from NetAutoTool import NetAutoTool
 
 if __name__ == '__main__':
-    net, rich = NetAutoTool(), RichTool
-
+    rich = RichTool
     table = {
         "colums": ('序号', '功能'),
         "rows": [
@@ -17,8 +16,9 @@ if __name__ == '__main__':
             ('6', '清除设备缓存数据'),
         ]
     }
-
     rich.printTable(title="按功能选择对应的序号", colums=table["colums"], rows=table["rows"])
+
+    net = NetAutoTool()
 
     choice_function = input("请选择: ")
     if choice_function == '1':

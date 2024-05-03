@@ -4,8 +4,6 @@
 import os
 import configparser
 
-from pathlib import Path
-
 
 class Config(object):
     def __init__(self, config_file='config.ini'):

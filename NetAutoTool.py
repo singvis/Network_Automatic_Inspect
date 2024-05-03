@@ -125,7 +125,7 @@ class NetAutoTool(object):
         self.FtpPassword = global_config.get('account', 'ftp_password')  # Ftp 密码
 
         # 并发|锁
-        self.async_pool = gevent.pool.Pool(int(global_config.get('config', 'concurrent_num')))
+        self.async_pool = gevent.pool.Pool(int(global_config.get('config', 'thread_num')))
         self.geventLock = BoundedSemaphore(1)  # 携程锁
 
         # autodetect
@@ -233,7 +233,6 @@ class NetAutoTool(object):
             # 等待所有线程完成
             gevent.joinall(results)
 
-            # results= [<Greenlet at 0x20b16b96160: _run>, ...]
             # 组合判断ip、port和device_type必须为真条件(netmiko场景)
             device_info_list = [greenlet.value for greenlet in results if greenlet.value
                                 and greenlet.value.get("ip") and greenlet.value.get("port")
@@ -299,7 +298,8 @@ class NetAutoTool(object):
                     # 判断scan结果为真(不同nmap版本扫描结果会不太一样)
                     # 有的扫描端口不通，结果为空，有的扫描端口不通，结果是'filtered'
                     if res['scan']:
-                        return port if res['scan'][ip]['tcp'][int(port)]['state'] == 'open' else None
+                        if res['scan'][ip]['tcp'][int(port)]['state'] == 'open':
+                            return port  # 扫描端口通则返回数据
 
                 output = "{:<20} 端口扫描不可达,请检查!".format(ip)
                 self.rich.errPrint(output)
@@ -330,7 +330,7 @@ class NetAutoTool(object):
                         return device_type
 
                 # ssh探测
-                if self.ssh_detect:
+                if self.ssh_detect == 'true':
                     kwargs['device_type'] = "autodetect"
                     ssh = MySSHDetect(**kwargs)
                     device_type = ssh.autodetect()
@@ -341,12 +341,13 @@ class NetAutoTool(object):
                 self.rich.errPrint(output)
                 self.fail.append(ip)
                 self.write_to_file(
-                    **{'code': 0, 'result': str(output), 'path': os.path.join(self.log, self.fail_file)})
+                    **{'code': 0, 'result': str(output), 'path': os.path.join(self.log, self.fail_file)}
+                )
 
                 return False
 
         except Exception as e:
-            output = "{:<20} 设备类型检测错误! {}".format(ip, str(e))
+            output = "{:<20} 设备类型检测错误: {}".format(ip, str(e))
             self.rich.errPrint(output)
             self.fail.append(ip)
             self.write_to_file(
@@ -494,7 +495,7 @@ class NetAutoTool(object):
         try:
             connect = ''
             # 判断使用telnet协议
-            if host['port'] == 23:
+            if host['port'] == '23':
                 # fast_cli=False，可修复telnet login authentication报错.
                 host['device_type'] = f"{host['device_type']}_telnet"
                 host = self.normalize_netmiko(host)
@@ -519,7 +520,6 @@ class NetAutoTool(object):
                 else:
                     connect = ConnectHandler(**host)
             return connect
-
         # 异常捕获
         except NetMikoAuthenticationException:
             output = "Failed.....{:<15}  用户名或密码认证失败!".format(host['ip'])
@@ -753,5 +753,5 @@ if __name__ == '__main__':
     # print("耗时：{:0.2f}".format((end_time - start_time).total_seconds()))
 
     net = NetAutoTool()
-    net.execute_getConfig()
+    net.execute_connect()
 
