@@ -36,12 +36,11 @@ from functools import wraps
 from datetime import datetime
 from openpyxl.reader.excel import load_workbook
 from netaddr import IPNetwork, IPAddress, AddrFormatError
-from prettytable import PrettyTable
-from extras.ssh_dispatcher import (CustomFortinetSSH, CustomJuniperSSH, FiberHomeSSH, HillStoneSSH, MaipuSSH)
 from extras.snmp_autodetect import MySNMPDetect
 from extras.ssh_autodetect import MySSHDetect
 from jinja2 import FileSystemLoader, Environment
-from netmiko import ConnectHandler
+# from netmiko import ConnectHandler
+from zetops.zetmiko import ConnectHandler
 from netmiko.ssh_exception import NetMikoAuthenticationException, NetmikoTimeoutException
 from gevent.lock import BoundedSemaphore
 from utils.RichTool import RichTool
@@ -84,8 +83,8 @@ def async_task(wrapped):
     """
     @wraps(wrapped)  # wrapper = wraps(wrapped)(wrapper)  # partial function
     def wrapper(self, *args, **kwargs):
+        # print(args, kwargs)
         start_time = datetime.now()
-
         if args and isinstance(args[0], (list, tuple, set)):
             greenlets = [self.async_pool.spawn(wrapped, self, arg) for arg in args[0]]
             gevent.joinall(greenlets)
@@ -93,7 +92,7 @@ def async_task(wrapped):
             print("Invalid arguments passed to the async_task decorator.")
 
         end_time = datetime.now()
-        print("总共耗费时长 {:0.2f}秒.".format((end_time - start_time).total_seconds()))
+        # print("总共耗费时长 {:0.2f}秒.".format((end_time - start_time).total_seconds()))
         self.printSum((end_time - start_time).total_seconds())
 
     return wrapper
@@ -102,14 +101,23 @@ def async_task(wrapped):
 class NetAutoTool(object):
     def __init__(self):
         """初始参数"""
-        # 基础信息
-        self.device_file = "巡检模板.xlsx"  # 模板文件
+        # 模板文件
+        self.device_file = "巡检模板.xlsx"
+
+        # 设备远程端口
         self.device_port = list(global_config.get('nmap', 'scan_device_port').split(','))  # 扫描设备端口，缺省22,23
+
+        # 用户密码
         self.username = global_config.get('account', 'username')  # 用户名
         self.password = global_config.get('account', 'password')  # 用户密码
         # self.config_username = global_config.get('account', 'config_username')  # 管理用户
         # self.config_password = global_config.get('account', 'config_password')  # 管理用户密码
         self.secret = global_config.get('account', 'secret')  # 特权密码
+
+        # ftp服务器
+        self.FtpServer = global_config.get('account', 'ftp_server')  # Ftp Server
+        self.FtpUser = global_config.get('account', 'ftp_username')  # Ftp 用户名
+        self.FtpPassword = global_config.get('account', 'ftp_password')  # Ftp 密码
 
         # 缓存数据
         self.cache_data_file = os.path.join('cache', 'cache_data.json')
@@ -118,11 +126,6 @@ class NetAutoTool(object):
         self.logtime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")  # 日期时间
         self.log = "LOG"
         self.fail_file = f"fail_{self.logtime}.log"
-
-        # ftp服务器
-        self.FtpServer = global_config.get('account', 'ftp_server')  # Ftp Server
-        self.FtpUser = global_config.get('account', 'ftp_username')  # Ftp 用户名
-        self.FtpPassword = global_config.get('account', 'ftp_password')  # Ftp 密码
 
         # 并发|锁
         self.async_pool = gevent.pool.Pool(int(global_config.get('config', 'thread_num')))
@@ -137,15 +140,20 @@ class NetAutoTool(object):
         self.success = []
         self.fail = []
 
-        # 开关debug
-        self.enableDebug()
-
         # rich
         self.rich = RichTool
 
+        # 开关debug
+        self.enableDebug()
+
+        # 判断自动检测只能一个为true
+        if self.snmp_detect == 'true' and self.ssh_detect == 'true':
+            raise ValueError("snmp_detect 和 ssh_detect只能设置其一为True.")
+
+
     def enableDebug(self) -> None:
         if global_config.get('debug', 'debug').lower() == 'true':
-            print("开启debug模式...")
+            self.rich.line("开启debug模式", style='red')
             logging.basicConfig(filename='debug.log', level=logging.DEBUG)
             logging.getLogger("netmiko")
 
@@ -157,9 +165,12 @@ class NetAutoTool(object):
     def printSum(self, total_time) -> None:
         """打印结果汇总信息"""
         total_devices, success, fail = len(self.success + self.fail), len(self.success), len(self.fail)
-        tb = PrettyTable(['设备总数', '成功', '失败', '总耗时'])
-        tb.add_row([total_devices, success, fail, "{:0.2f}s".format(total_time)])
-        print(tb)
+        self.rich.printTable(
+            title="结果汇总",
+            columns=['设备总数', '成功', '失败', '总耗时'],
+            rows=[(total_devices, success, fail, f"{total_time}s")],
+        )
+
 
     def time_now(self) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-4]
@@ -294,7 +305,8 @@ class NetAutoTool(object):
                     # 判断端口是否为空，如果为空，则跳过
                     if not port:
                         continue
-                    res = self.nscan().scan(hosts=ip, ports=str(port))  # scan()的参数必须为字符串类型string
+                    scan_args = "-Pn"  # 优化过防火墙，避免扫描失败
+                    res = self.nscan().scan(hosts=ip, ports=str(port), arguments=scan_args)  # scan()的参数必须为字符串类型string
                     # 判断scan结果为真(不同nmap版本扫描结果会不太一样)
                     # 有的扫描端口不通，结果为空，有的扫描端口不通，结果是'filtered'
                     if res['scan']:
@@ -505,18 +517,18 @@ class NetAutoTool(object):
                 host = self.normalize_netmiko(host)
                 if 'huawei' in host['device_type']:
                     connect = ConnectHandler(**host, conn_timeout=15)
-                elif 'fortinet' in host['device_type']:
-                    # 调用重写的MyFortinetSSH类
-                    connect = CustomFortinetSSH(**host)
-                elif 'juniper' in host['device_type']:
-                    # 优化netscreen设备(优化分屏命令)
-                    connect = CustomJuniperSSH(**host)
-                elif 'maipu' in host['device_type']:      # 支持迈普厂商
-                    connect = MaipuSSH(**host)
-                elif 'fiberhome' in host['device_type']:  # 支持烽火厂商
-                    connect = FiberHomeSSH(**host)
-                elif 'hillstone' in host['device_type']:  # 支持山石厂商
-                    connect = HillStoneSSH(**host)
+                # elif 'fortinet' in host['device_type']:
+                #     # 调用重写的MyFortinetSSH类
+                #     connect = CustomFortinetSSH(**host)
+                # elif 'juniper' in host['device_type']:
+                #     # 优化netscreen设备(优化分屏命令)
+                #     connect = CustomJuniperSSH(**host)
+                # elif 'maipu' in host['device_type']:      # 支持迈普厂商
+                #     connect = MaipuSSH(**host)
+                # elif 'fiberhome' in host['device_type']:  # 支持烽火厂商
+                #     connect = FiberHomeSSH(**host)
+                # elif 'hillstone' in host['device_type']:  # 支持山石厂商
+                #     connect = HillStoneSSH(**host)
                 else:
                     connect = ConnectHandler(**host)
             return connect
@@ -532,6 +544,7 @@ class NetAutoTool(object):
             raise ValueError(output)
 
     @async_task  # 等价于 run_t = async_task(run_t)
+    # @async_task("连接网络设备")  # 等价于 run_t = async_task(arg)(run_t)
     def run_t(self, host: list) -> None:  # run_t = wrapper
         """
         主要获取设备名称提示符
