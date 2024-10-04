@@ -73,18 +73,16 @@ RE_VENDOR = {
 def async_task(wrapped):
     """
     装饰器，用于异步执行并发任务
-
     Args:
         wrapped: 需要装饰的函数
-
     Returns:
         wrapper: 装饰后的函数
-
     """
     @wraps(wrapped)  # wrapper = wraps(wrapped)(wrapper)  # partial function
     def wrapper(self, *args, **kwargs):
         # print(args, kwargs)
         start_time = datetime.now()
+
         if args and isinstance(args[0], (list, tuple, set)):
             greenlets = [self.async_pool.spawn(wrapped, self, arg) for arg in args[0]]
             gevent.joinall(greenlets)
@@ -105,7 +103,7 @@ class NetAutoTool(object):
         self.device_file = "巡检模板.xlsx"
 
         # 设备远程端口
-        self.device_port = list(global_config.get('nmap', 'scan_device_port').split(','))  # 扫描设备端口，缺省22,23
+        self.device_port = list(global_config.get('nmap', 'scan_net_port').split(','))  # 扫描设备端口，缺省22,23
 
         # 用户密码
         self.username = global_config.get('account', 'username')  # 用户名
@@ -150,7 +148,6 @@ class NetAutoTool(object):
         if self.snmp_detect == 'true' and self.ssh_detect == 'true':
             raise ValueError("snmp_detect 和 ssh_detect只能设置其一为True.")
 
-
     def enableDebug(self) -> None:
         if global_config.get('debug', 'debug').lower() == 'true':
             self.rich.line("开启debug模式", style='red')
@@ -171,7 +168,6 @@ class NetAutoTool(object):
             rows=[(total_devices, success, fail, f"{total_time}s")],
         )
 
-
     def time_now(self) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-4]
 
@@ -187,15 +183,23 @@ class NetAutoTool(object):
     def get_devices_info(self, wb, row, ip) -> dict:
         """
         通过nscan扫描出来的参数临时写入cache文件
-        再回填到excel，可减少下scan动作
+        再回填到excel，可减少下scan重复动作
         """
         try:
-            port = row[4].value if row[4].value else self.scan_port(ip=ip, port=self.device_port)
+            port = ''
+            # 判断protocol和port字段
+            if row[3].value:
+                if (row[3].value.lower().strip() == 'ssh') and row[4].value is None:
+                    port = 22
+                elif (row[3].value.lower().strip() == 'telnet') and row[4].value is None:
+                    port = 23
+            else:
+                port = row[4].value if row[4].value else self.scan_port(ip=ip, port=self.device_port)  # 端口号
             if not port:
                 return {}
             info_dict = {
                 'ip': ip,
-                'protocol': row[3].value,
+                # 'protocol': row[3].value,
                 'port': port,
                 'username': row[5].value if row[5].value else global_config.get('account', 'username').strip(),
                 'password': row[6].value if row[6].value else global_config.get('account', 'password').strip(),
@@ -293,16 +297,20 @@ class NetAutoTool(object):
         return nmap.PortScanner()
 
     def scan_port(self, *args, **kwargs) -> Union[str, bool]:
-        """扫描设备端口"""
+        """
+        扫描设备端口
+        """
         try:
             ip = kwargs.get('ip')  # ip地址
             item = self.load_cache_data(ip)  # 加载缓存文件数据
             if item:
+                self.rich.print(f"cache文件已存在 {ip}:{item.get('port')}，已跳过扫描!")
                 return item.get("port")   # 如果缓存有，则直接返回数据
             else:
                 self.rich.print("{} Start scanning port...{}".format(self.time_now(), ip))
                 for port in kwargs.get('port', ''):
                     # 判断端口是否为空，如果为空，则跳过
+                    print(port)
                     if not port:
                         continue
                     scan_args = "-Pn"  # 优化过防火墙，避免扫描失败
@@ -378,7 +386,9 @@ class NetAutoTool(object):
             self.rich.errPrint(f"写入文件错误: {e}")
 
     def get_cmd_info(self, wb, sheet_name) -> list:
-        """获取命令条目的信息"""
+        """
+        获取命令条目的信息
+        """
         cmd_list = []
         try:
             cmd_sheet = wb[sheet_name]
@@ -436,11 +446,10 @@ class NetAutoTool(object):
         try:
             for vendor, regex in RE_VENDOR.items():
                 match = re.search(regex, device_type)
+                # print(vendor, "match", match)
                 if match:
                     new_vendor = vendor
                     return new_vendor
-                else:
-                    return device_type
         except Exception as e:
             raise ValueError(f"normalize_vendor错误: {e}.")
 
@@ -537,15 +546,15 @@ class NetAutoTool(object):
             output = "Failed.....{:<15}  用户名或密码认证失败!".format(host['ip'])
             raise ValueError(output)
         except NetmikoTimeoutException:
-            output = "Failed.....{:<15}  连通性问题!".format(host['ip'])
+            output = "Failed.....{:<15}  连接超时!".format(host['ip'])
             raise ValueError(output)
         except Exception as e:
             output = "Failed.....{:<15} 连接失败!: {}".format(host['ip'], e)
             raise ValueError(output)
 
     @async_task  # 等价于 run_t = async_task(run_t)
-    # @async_task("连接网络设备")  # 等价于 run_t = async_task(arg)(run_t)
-    def run_t(self, host: list) -> None:  # run_t = wrapper
+    # @async_task(arg)  # 等价于 run_t = async_task(arg)(run_t)
+    def run_t(self, host) -> None:  # run_t = wrapper
         """
         主要获取设备名称提示符
         """
@@ -574,8 +583,10 @@ class NetAutoTool(object):
             })
 
     @async_task
-    def run_cmd(self, host: dict) -> None:
-        """获取设备配置"""
+    def run_show_cmd(self, host) -> None:
+        """
+        获取设备配置
+        """
         self.rich.print('设备...{:.<15}...开始执行'.format(host['ip']))
         try:
             # show命令条目
@@ -649,12 +660,11 @@ class NetAutoTool(object):
                 'path': os.path.join(self.log, self.fail_file)
             })
 
-    # @async_task
-    def run_config_cmd(self, host: dict) -> None:
+    @async_task
+    def run_config_cmd(self, host) -> None:
         """
         执行配置命令并保存当前配置
         """
-        # self.printPretty('设备...{:.<15}...开始执行配置'.format(host['ip']))
         self.rich.print('设备...{:.<15}...开始执行配置'.format(host['ip']))
 
         # 特权功能标识位
@@ -695,7 +705,6 @@ class NetAutoTool(object):
                 output += conn.exit_config_mode()
                 # 保存设备当前配置
                 output += conn.save_config()
-                # self.printPretty(output)
                 self.rich.print(output)
 
                 # 写入文件
@@ -709,7 +718,6 @@ class NetAutoTool(object):
                 self.success.append(host['ip'])
 
             except Exception as e:
-                # self.printPretty(f"run_config_failed...{host['ip']} : {e}")
                 self.rich.errPrint(f"run_config_failed...{host['ip']} : {e}")
                 # 写入文件
                 self.write_to_file(**{'code': 0, 'result': host['ip'] + "__" + str(e)})
@@ -737,13 +745,14 @@ class NetAutoTool(object):
         下发设备配置
         """
         host = self.get_devices_info_async()  # 列表嵌套字典
-        self.run_cmd(host) if host else None
+        self.run_show_cmd(host) if host else None
 
     def execute_sendConfig(self) -> None:
         """
         下发设备配置
         """
-        pass
+        host = self.get_devices_info_async()  # 列表嵌套字典
+        self.run_config_cmd(host)
 
     def execute_saveConfig(self) -> None:
         """
@@ -766,5 +775,7 @@ if __name__ == '__main__':
     # print("耗时：{:0.2f}".format((end_time - start_time).total_seconds()))
 
     net = NetAutoTool()
-    net.execute_connect()
+    # net.execute_connect()
+    # net.execute_getConfig()
+    net.execute_sendConfig()
 
