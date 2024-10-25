@@ -24,9 +24,12 @@ from netmiko.fortinet import FortinetSSH
 from netmiko.juniper import JuniperSSH
 
 RE_HOSTNAME = {
+    # China
     'huawei': re.compile(r"(?<=(\<|\[)).*?(?=(\>|\]))", re.IGNORECASE),  # <hostname> or [hostname]
     'hp_comware': re.compile(r"(?<=(\<|\[)).*(?=(\>|\]))", re.IGNORECASE),  # <hostname> or [hostname]
     'ruijie': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname> or hostname#
+    'zte_zxros': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname> or hostname#
+    # Other
     'cisco': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname> or hostname#
     'aruba': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname#
     'fortinet': re.compile(r".*?(?=#)", re.IGNORECASE),  # hostname#
