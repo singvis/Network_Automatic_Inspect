@@ -52,9 +52,9 @@ _说明：代码会不间断的迭代更新，请下载最新版本._
     `pip install -r requirement.txt`
     ```python
     # 文件主要包括如下必要模块.
-    netmiko==3.4.0
-    prettytable==3.3.0
-    openpyxl==3.0.9
+    netmiko
+    prettytable
+    openpyxl
     ```
 
 ## 3.2 巡检模板说明
