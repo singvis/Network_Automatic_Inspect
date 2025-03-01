@@ -19,62 +19,7 @@ from openpyxl.reader.excel import load_workbook
 from multiprocessing.pool import ThreadPool
 from prettytable import PrettyTable
 from netmiko import ConnectHandler
-from netmiko.ssh_exception import (NetMikoTimeoutException, AuthenticationException, SSHException)
-from netmiko.fortinet import FortinetSSH
-from netmiko.juniper import JuniperSSH
-
-RE_HOSTNAME = {
-    # China
-    'huawei': re.compile(r"(?<=(\<|\[)).*?(?=(\>|\]))", re.IGNORECASE),  # <hostname> or [hostname]
-    'hp_comware': re.compile(r"(?<=(\<|\[)).*(?=(\>|\]))", re.IGNORECASE),  # <hostname> or [hostname]
-    'ruijie': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname> or hostname#
-    'zte_zxros': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname> or hostname#
-    # Other
-    'cisco': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname> or hostname#
-    'aruba': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname#
-    'fortinet': re.compile(r".*?(?=#)", re.IGNORECASE),  # hostname#
-    'a10': re.compile(r".*?(?=(>|#))", re.IGNORECASE),  # hostname-Active> or hostname-Active#
-    'paloalto': re.compile(r"(?<=(@)).*?(?=(\(|\>))", re.IGNORECASE),  # admin@hostname(active)>,
-    'juniper': re.compile(r".*?(?=(\-\>))", re.IGNORECASE),  # hostname->
-    'linux': re.compile(r"(?<=(\[)).*?(?=(~|]))", re.IGNORECASE),
-}
-
-
-class MyFortinetSSH(FortinetSSH):
-    """重写了FortinetSSH类"""
-
-    # 因为通过ftp备份配置，不需要关闭分屏
-    # 多vdom场景下，需要进入global模式，需要有一些权限权限，可以备份多个vdom的配置
-    def disable_paging(self, delay_factor=1, **kwargs):
-        check_command = "get system status | grep Virtual"
-        output = self.send_command_timing(check_command)
-        self.allow_disable_global = True
-        self.vdoms = False
-        self._output_mode = "more"
-
-        if re.search(r"Virtual domain configuration: (multiple|enable)", output):
-            self.vdoms = True
-            vdom_additional_command = "config global"
-            output = self.send_command_timing(vdom_additional_command, delay_factor=2)
-            if "Command fail" in output:
-                self.allow_disable_global = False
-                self.remote_conn.close()
-                self.establish_connection(width=100, height=1000)
-        return output
-
-
-class MyJuniperSSH(JuniperSSH):
-    """重写了JuniperSSH类"""
-
-    # netscreen 不支持""set cli screen-width 511""命令，调整下命令
-    def session_preparation(self):
-        """Prepare the session after the connection has been established."""
-        self.enter_cli_mode()
-
-        self.disable_paging(
-            command="set console page 0", pattern=r"->"
-        )
-        self.set_base_prompt()
+from netmiko.exceptions import (NetMikoTimeoutException, AuthenticationException, SSHException)
 
 
 class BackupConfig(object):
@@ -196,22 +141,49 @@ class BackupConfig(object):
         except Exception as e:
             self.printPretty("get_cmd_info Error: {}".format(e))
 
-    def format_hostname(self, hostname, device_type):
-        """格式化主机名称"""
+    def format_hostname(self, hostname):
+        """格式化主机名称
+        Args:
+            hostname (str): 设备名称
+        Returns:
+            str: 格式化后的设备名称
+        """
         try:
-            for vendor, regex in RE_HOSTNAME.items():
-                if vendor in device_type:
-                    match = re.search(regex, hostname)
-                    if match:
-                        new_hostname = match.group(0).strip()
-                    else:
-                        new_hostname = hostname.split()[0].strip("<>#$()[] ")
+            # 如果hostname为空，直接返回None
+            if not hostname:
+                return "None"
+
+            # 匹配模式
+            patterns = [
+                r'(?<=@).*?(?=[\:|\>|\(|~|\s])',  # 匹配@后面的名称 (Juniper/PaloAlto/Linux)
+                r'(?<=\[)[^]]+(?=\])',  # 匹配[]中的名称 (华为配置模式)
+                r'(?<=<)[^>]+(?=>)',  # 匹配<>中的名称 (华为普通模式)
+                r'^[A-Za-z0-9_\-\.]+(?=[>#])',  # 匹配以>或#结尾前的名称 (思科/锐捷等)
+                r'^[A-Za-z0-9_\-\.]+',  # 匹配开头的字母数字串 (兜底匹配)
+            ]
+
+            # 尝试每种模式
+            extracted_name = None
+            for pattern in patterns:
+                match = re.search(pattern, hostname)
+                if match:
+                    extracted_name = match.group(0)
+                    # print(extracted_name)
+                    break
+
+            # 如果没有匹配到，返回原始字符串的清理版本
+            if not extracted_name:
+                # 移除所有特殊字符
+                extracted_name = re.sub(r'[^A-Za-z0-9_\-\.]', '', hostname)
+
+            # 清理结果：移除前后空格，并确保没有连续的空格
+            extracted_name = extracted_name.strip()
+
+            return extracted_name if extracted_name else "Unknown"
 
         except Exception as e:
-            self.printPretty(e)
+            self.printPretty(f"格式化主机名称失败: {str(e)}")
             raise e
-
-        return new_hostname
 
     def format_cmd(self, cmd):
         """格式化命令行"""
@@ -234,12 +206,6 @@ class BackupConfig(object):
 
                 if 'huawei' in host['device_type']:
                     connect = ConnectHandler(**host, conn_timeout=15)
-                elif 'fortinet' in host['device_type']:
-                    # 调用重写的MyFortinetSSH类
-                    connect = MyFortinetSSH(**host)
-                elif 'juniper' in host['device_type']:
-                    # 优化netscreen设备(优化分屏命令)
-                    connect = MyJuniperSSH(**host)
                 else:
                     connect = ConnectHandler(**host)
             # 判断使用telnet协议
@@ -290,7 +256,7 @@ class BackupConfig(object):
 
         if conn:
             # 获取设备名称并格式化
-            hostname = self.format_hostname(conn.find_prompt(), host['device_type'])
+            hostname = self.format_hostname(conn.find_prompt())
             dirname = host['ip'] + '_' + hostname  # 192.168.1.1_Router-01
 
             # 这里要注意下windown文件命名不能有特殊符号，否则会创建失败
@@ -322,18 +288,7 @@ class BackupConfig(object):
                                     'path': os.path.join(dirpath, self.format_cmd(cmd) + '.conf')}
                             self.write_to_file(**data)
                 else:
-                    # 适用于ftp/sftp/scp备份
-                    if host['device_type'] == 'fortinet':
-                        # 飞塔防火墙FTP备份
-                        cmd = "execute backup config ftp {}_{}.conf {} {} {}".format(hostname, self.logtime,
-                                                                                     self.FtpServer,
-                                                                                     self.FtpUser, self.FtpPassword)
-                        conn.send_command(cmd, expect_string="to ftp server OK")
-                    elif host['device_type'] == 'cisco_wlc':
-                        # 按需补充
-                        pass
-                    else:
-                        pass
+                    pass
 
                 self.success.append(host['ip'])
 
