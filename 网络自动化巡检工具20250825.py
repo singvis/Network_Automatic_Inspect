@@ -88,7 +88,7 @@ class BackupConfig(object):
     def load_excel(self):
         """加载excel文件"""
         try:
-            wb = load_workbook(self.device_file)
+            wb = load_workbook(self.device_file, read_only = True)
             return wb
 
         except Exception:
@@ -99,12 +99,15 @@ class BackupConfig(object):
         try:
             wb = self.load_excel()
             ws1 = wb[wb.sheetnames[0]]
-
             n = 0
             # 通过参数min_row、max_col限制区域
             for row in ws1.iter_rows(min_row=2, max_col=9):
                 n += 1
-                if str(row[1].value).strip() == '#':
+                values = [cell.value for cell in row]
+                if not any(values):
+                    # 跳过excel编辑过空的单元格
+                    continue
+                if str(values[1]).strip() == '#':
                     # 跳过注释行
                     continue
                 info_dict = {'ip': row[2].value,
